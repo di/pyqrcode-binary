@@ -1,0 +1,95 @@
+name: Repackage and Publish PyPI Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdist_url:
+        description: 'URL of the source distribution (tar.gz) on PyPI'
+        required: true
+        type: string
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: python -m pip install -U pip build
+
+      - name: Download and unpack source distribution
+        id: download_unpack
+        run: |
+          # Get the sdist URL from input
+          SDIST_URL=${{ github.event.inputs.sdist_url }}
+
+          # Extract the filename from the URL (e.g., PyQRCode-1.2.1.tar.gz)
+          FILENAME=$(basename "$SDIST_URL")
+
+          # Download the file
+          curl -L -o "$FILENAME" "$SDIST_URL"
+          echo "Downloaded $FILENAME"
+
+          # Extract the tar.gz file
+          EXTRACTED_DIR=$(tar -tzf "$FILENAME" | head -1 | sed -e 's@/.*@@')
+          if [ -z "$EXTRACTED_DIR" ]; then
+            echo "Could not determine extracted directory name from tarball contents."
+            # Fallback: try to guess from filename
+            EXTRACTED_DIR="${FILENAME%.tar.gz}"
+            EXTRACTED_DIR="${EXTRACTED_DIR%.tar}" # handles .tar as well
+            echo "Falling back to guessed directory name: $EXTRACTED_DIR"
+          fi
+
+          tar -xzf "$FILENAME"
+          echo "Extracted to $EXTRACTED_DIR"
+
+          # Set output for next steps
+          echo "extracted_dir_name=$EXTRACTED_DIR" >> $GITHUB_OUTPUT
+          echo "original_sdist_filename=$FILENAME" >> $GITHUB_OUTPUT
+
+      - name: Navigate to extracted directory
+        id: navigate
+        run: |
+          EXTRACTED_DIR="${{ steps.download_unpack.outputs.extracted_dir_name }}"
+          if [ -d "$EXTRACTED_DIR" ]; then
+            cd "$EXTRACTED_DIR"
+          else
+            echo "Error: Directory '$EXTRACTED_DIR' does not exist."
+            exit 1
+          fi
+        shell: bash
+
+      - name: Rewrite setup.py
+        working-directory: ${{ steps.download_unpack.outputs.extracted_dir_name }}
+        run: |
+          if [ ! -f "setup.py" ]; then
+            echo "setup.py not found in $(pwd)!"
+          else
+            sed -i -E "s/(name\s*=\s*['\"])[^'\"]*(['\"])/\1pyqrcode-binary\2/" setup.py
+            sed -i -E "s/(url\s*=\s*['\"])[^'\"]*(['\"])/\1https:\/\/github.com\/di\/pyqrcode-binary\/\2/" setup.py
+            if grep -q "name=['\"]pyqrcode-binary['\"]" setup.py; then
+              echo "setup.py successfully modified."
+            else
+              echo "Failed to modify setup.py or verification failed."
+              exit 1
+            fi
+          fi
+        shell: bash
+
+      - name: Build the wheel
+        working-directory: ${{ steps.download_unpack.outputs.extracted_dir_name }}
+        run: |
+          python -m build --wheel
+          echo "Wheel built. Contents of dist/ in ${{ steps.download_unpack.outputs.extracted_dir_name }}/dist/:"
+          ls -la dist/
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages_dir: ${{ steps.download_unpack.outputs.extracted_dir_name }}/dist/
+
